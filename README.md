@@ -20,6 +20,9 @@ Buka http://localhost:3001 (halaman Data) dan http://localhost:3001/trends (hala
 | HOST           | 127.0.0.1                  | Pakai 0.0.0.0 agar bisa diakses dari luar    |
 | DATA_DIR       | ./data                     | Lokasi monitor.db dan folder images/         |
 | TIMEOUT_MS     | 30000                      | Batas waktu setiap permintaan ke API (ms)    |
+| IMAGE_TIMEOUT_MS | 180000                   | Batas waktu unduh gambar per percobaan (ms)  |
+| IMAGE_RETRIES  | 2                          | Jumlah percobaan ulang unduh gambar          |
+| IMAGE_RETRY_DELAY_MS | 5000                 | Jeda antar percobaan unduh gambar (ms)       |
 
 Contoh: `HOST=0.0.0.0 PORT=8080 node server.js`
 
@@ -36,8 +39,8 @@ Dashboard tidak memakai login. Jika dibuka ke jaringan luar, pasang di belakang 
 
 ## Alur tiap siklus
 
-1. `GET /api/flagged/<kamera>`, gambar disimpan sebagai `data/images/<kamera>_<waktu>_<acak>.jpg` (nama unik).
-2. `GET /api/dashboard`, data disimpan ke tabel `readings` bersama nama file gambar tadi (`image_file`).
+1. `GET /api/flagged/<kamera>`, gambar ditunggu hingga selesai dengan batas waktu 3 menit per percobaan. Jika gagal, dicoba ulang 2 kali dengan jeda 5 detik. Gambar disimpan sebagai `data/images/<kamera>_<waktu>_<acak>.jpg` (nama unik).
+2. Setelah semua upaya unduh gambar selesai, `GET /api/dashboard` mengambil data dan menyimpannya ke tabel `readings` bersama nama file gambar (`image_file`).
 3. Jika langkah 2 gagal, gambar dari langkah 1 dihapus agar tidak ada file yatim.
    Jika hanya gambar yang gagal, data tetap disimpan dengan `image_file` kosong.
 

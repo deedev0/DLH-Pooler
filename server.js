@@ -22,6 +22,9 @@ const CONFIG = {
   host: process.env.HOST || '127.0.0.1',
   dataDir: path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data')),
   timeoutMs: Number(process.env.TIMEOUT_MS || 30000),
+  imageTimeoutMs: Number(process.env.IMAGE_TIMEOUT_MS || 180000),
+  imageRetries: Math.max(0, Math.floor(Number(process.env.IMAGE_RETRIES ?? 2) || 0)),
+  imageRetryDelayMs: Number(process.env.IMAGE_RETRY_DELAY_MS || 5000),
 };
 const IMAGES_DIR = path.join(CONFIG.dataDir, 'images');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -84,24 +87,38 @@ const insertPollLog = db.prepare('INSERT INTO poll_log (polled_at, ok, image_ok,
 const EXT_BY_TYPE = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const nn = (v) => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v);
 
-async function httpGet(url) {
-  return fetch(url, { signal: AbortSignal.timeout(CONFIG.timeoutMs) });
+async function httpGet(url, timeoutMs = CONFIG.timeoutMs) {
+  return fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
 }
 
 /** Unduh gambar kamera, simpan dengan nama unik. */
 async function downloadImage(cameraId, polledAt) {
-  const res = await httpGet(`${CONFIG.baseUrl}/api/flagged/${encodeURIComponent(cameraId)}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  if (!type.startsWith('image/')) throw new Error(`respons bukan gambar (${type || 'tanpa content-type'})`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  if (!buf.length) throw new Error('gambar kosong');
+  const url = `${CONFIG.baseUrl}/api/flagged/${encodeURIComponent(cameraId)}`;
+  let lastError;
 
-  const stamp = polledAt.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-  const safeCam = cameraId.replace(/[^\w-]/g, '_');
-  const name = `${safeCam}_${stamp}_${crypto.randomBytes(4).toString('hex')}.${EXT_BY_TYPE[type] || 'jpg'}`;
-  fs.writeFileSync(path.join(IMAGES_DIR, name), buf);
-  return { name, bytes: buf.length };
+  for (let attempt = 1; attempt <= CONFIG.imageRetries + 1; attempt++) {
+    try {
+      const res = await httpGet(url, CONFIG.imageTimeoutMs);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (!type.startsWith('image/')) throw new Error(`respons bukan gambar (${type || 'tanpa content-type'})`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length) throw new Error('gambar kosong');
+
+      const stamp = polledAt.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+      const safeCam = cameraId.replace(/[^\w-]/g, '_');
+      const name = `${safeCam}_${stamp}_${crypto.randomBytes(4).toString('hex')}.${EXT_BY_TYPE[type] || 'jpg'}`;
+      fs.writeFileSync(path.join(IMAGES_DIR, name), buf);
+      return { name, bytes: buf.length };
+    } catch (e) {
+      lastError = e;
+      if (attempt > CONFIG.imageRetries) break;
+      log(`gambar ${cameraId}: percobaan ${attempt}/${CONFIG.imageRetries + 1} gagal (${e.message}), mencoba lagi dalam ${CONFIG.imageRetryDelayMs} ms`);
+      await new Promise((resolve) => setTimeout(resolve, CONFIG.imageRetryDelayMs));
+    }
+  }
+
+  throw lastError;
 }
 
 const status = { running: false, lastPollAt: null, lastOk: null, lastMessage: null, nextPollAt: null };
