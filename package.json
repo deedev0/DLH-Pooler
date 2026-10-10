@@ -1,0 +1,8 @@
+{
+  "name": "cctv-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Poller CCTV tiap 10 menit + dashboard (SQLite bawaan Node, tanpa npm install)",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=22.13" }
+}

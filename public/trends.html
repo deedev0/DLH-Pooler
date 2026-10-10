@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tren CCTV</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top" id="top"></header>
+
+<main>
+  <div class="controls">
+    <label class="field">Kamera
+      <select id="c-camera"><option value="">Semua</option></select>
+    </label>
+    <label class="field">Rentang waktu
+      <select id="c-range">
+        <option value="24">24 jam terakhir</option>
+        <option value="72">3 hari terakhir</option>
+        <option value="168" selected>7 hari terakhir</option>
+        <option value="720">30 hari terakhir</option>
+        <option value="">Semua data</option>
+      </select>
+    </label>
+    <label class="field">Pengelompokan
+      <select id="c-bucket">
+        <option value="">Otomatis</option>
+        <option value="raw">Setiap pengambilan</option>
+        <option value="hour">Per jam</option>
+        <option value="day">Per hari</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="error" class="error-banner" hidden></div>
+  <section class="kpis" id="kpis" aria-label="Ringkasan"></section>
+
+  <div class="charts">
+    <section class="chart-box full">
+      <h2>Jumlah terdeteksi</h2>
+      <p>Rata-rata dan puncak jumlah pada setiap titik waktu.</p>
+      <div class="canvas"><canvas id="ch-count" role="img" aria-label="Grafik garis jumlah terdeteksi dari waktu ke waktu"></canvas></div>
+    </section>
+    <section class="chart-box">
+      <h2>Keterisian zona</h2>
+      <p>Rata-rata persentase zona Inner dan Outer.</p>
+      <div class="canvas"><canvas id="ch-zones" role="img" aria-label="Grafik garis keterisian zona inner dan outer"></canvas></div>
+    </section>
+    <section class="chart-box">
+      <h2>Sebaran level</h2>
+      <p>Jumlah pengambilan pada tiap level per titik waktu.</p>
+      <div class="canvas"><canvas id="ch-levels" role="img" aria-label="Grafik batang bertumpuk sebaran level"></canvas></div>
+    </section>
+    <section class="chart-box full">
+      <h2>Pola harian</h2>
+      <p>Rata-rata dan puncak jumlah menurut jam dalam sehari (waktu setempat).</p>
+      <div class="canvas"><canvas id="ch-hours" role="img" aria-label="Grafik batang pola jumlah per jam"></canvas></div>
+    </section>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/common.js"></script>
+<script>
+renderTop('trends');
+const $ = (id) => document.getElementById(id);
+const charts = {};
+
+if (window.Chart) {
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  Chart.defaults.color = '#5c6b7a';
+  Chart.defaults.borderColor = '#e3e8ec';
+}
+
+function showError(msg) {
+  const el = $('error');
+  el.hidden = !msg;
+  el.textContent = msg || '';
+}
+
+function drawChart(id, config) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart($(id), config);
+}
+
+const baseOpts = (extra = {}) => ({
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, usePointStyle: false } } },
+  ...extra,
+});
+
+function labelFor(t, bucket) {
+  const d = new Date(t);
+  return bucket === 'day'
+    ? d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' })
+    : d.toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function renderKpis(data) {
+  const s = data.summary;
+  if (!s.total) { $('kpis').innerHTML = ''; return; }
+  const overPct = s.total ? (100 * (s.overload_n || 0)) / s.total : 0;
+  const l = data.latest;
+  $('kpis').innerHTML = `
+    <div class="kpi"><div class="label">Jumlah pengambilan</div><div class="value">${fmtNum(s.total)}</div><div class="sub">pada rentang terpilih</div></div>
+    <div class="kpi"><div class="label">Rata-rata jumlah</div><div class="value">${fmtNum(s.avg_count, 1)}</div><div class="sub">puncak ${fmtNum(s.max_count)}</div></div>
+    <div class="kpi"><div class="label">Waktu berstatus overload</div><div class="value ${overPct >= 50 ? 'over' : ''}">${overPct.toFixed(0)}%</div><div class="sub">${fmtNum(s.overload_n)} dari ${fmtNum(s.total)} pengambilan</div></div>
+    <div class="kpi"><div class="label">Keterisian tertinggi</div><div class="value">${fmtPct(s.max_inner)}</div><div class="sub">Inner; Outer ${fmtPct(s.max_outer)}</div></div>
+    <div class="kpi"><div class="label">Pembacaan terakhir</div><div class="value">${l ? levelChip(l.level) : '–'}</div><div class="sub">${l ? esc(fmtShort(l.polled_at)) : ''}</div></div>`;
+}
+
+async function load() {
+  showError('');
+  const hours = $('c-range').value;
+  const params = {
+    camera: $('c-camera').value,
+    from: hours ? new Date(Date.now() - Number(hours) * 3600000).toISOString() : '',
+    bucket: $('c-bucket').value,
+    tz: -new Date().getTimezoneOffset(),
+  };
+  let data;
+  try {
+    data = await getJSON('/api/trends', params);
+  } catch (e) {
+    showError(`Data tren tidak bisa dimuat: ${e.message}`);
+    return;
+  }
+  if (!window.Chart) { showError('Library grafik tidak termuat. Periksa koneksi internet browser Anda, lalu muat ulang halaman.'); }
+
+  renderKpis(data);
+  if (!window.Chart) return;
+
+  if (!data.series.length) {
+    for (const id of Object.keys(charts)) { charts[id].destroy(); delete charts[id]; }
+    showError('Belum ada data pada rentang ini. Pilih rentang yang lebih panjang atau tunggu pengambilan berikutnya.');
+    return;
+  }
+
+  const b = data.bucket;
+  const labels = data.series.map((r) => labelFor(r.t, b));
+  const dense = data.series.length > 60;
+  const pt = dense ? 0 : 3;
+
+  drawChart('ch-count', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Rata-rata', data: data.series.map((r) => r.avg_count), borderColor: '#0e5a6b', backgroundColor: '#0e5a6b', tension: 0.25, pointRadius: pt, borderWidth: 2 },
+        { label: 'Puncak', data: data.series.map((r) => r.max_count), borderColor: '#c23a22', backgroundColor: '#c23a22', borderDash: [5, 4], tension: 0.25, pointRadius: 0, borderWidth: 1.5 },
+      ],
+    },
+    options: baseOpts({ scales: { x: { ticks: { maxTicksLimit: 10, maxRotation: 0 } }, y: { beginAtZero: true, title: { display: true, text: 'Jumlah' } } } }),
+  });
+
+  drawChart('ch-zones', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Inner', data: data.series.map((r) => r.avg_inner), borderColor: '#0e5a6b', backgroundColor: '#0e5a6b', tension: 0.25, pointRadius: pt, borderWidth: 2, spanGaps: true },
+        { label: 'Outer', data: data.series.map((r) => r.avg_outer), borderColor: '#c98a12', backgroundColor: '#c98a12', tension: 0.25, pointRadius: pt, borderWidth: 2, spanGaps: true },
+      ],
+    },
+    options: baseOpts({
+      scales: { x: { ticks: { maxTicksLimit: 6, maxRotation: 0 } }, y: { beginAtZero: true, title: { display: true, text: 'Keterisian (%)' } } },
+    }),
+  });
+
+  // sebaran level: pivot per titik waktu
+  const levelNames = [...new Set(data.levels.map((r) => r.level))];
+  const order = { ok: 0, warn: 1, over: 2, none: 3 };
+  levelNames.sort((a, c) => order[levelTone(a)] - order[levelTone(c)]);
+  const tKeys = data.series.map((r) => r.t);
+  const idx = new Map(tKeys.map((t, i) => [t, i]));
+  const sets = levelNames.map((name) => ({
+    label: levelLabel(name),
+    data: tKeys.map(() => 0),
+    backgroundColor: TONE_COLOR[levelTone(name)],
+    borderWidth: 0,
+  }));
+  for (const r of data.levels) sets[levelNames.indexOf(r.level)].data[idx.get(r.t)] = r.n;
+  drawChart('ch-levels', {
+    type: 'bar',
+    data: { labels, datasets: sets },
+    options: baseOpts({
+      scales: { x: { stacked: true, ticks: { maxTicksLimit: 6, maxRotation: 0 } }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Pengambilan' } } },
+    }),
+  });
+
+  // pola per jam: isi 24 jam penuh
+  const hourMap = new Map(data.byHour.map((r) => [r.h, r]));
+  const hrs = [...Array(24).keys()];
+  drawChart('ch-hours', {
+    type: 'bar',
+    data: {
+      labels: hrs.map((h) => `${String(h).padStart(2, '0')}:00`),
+      datasets: [
+        { type: 'bar', label: 'Rata-rata', data: hrs.map((h) => hourMap.get(h)?.avg_count ?? null), backgroundColor: '#0e5a6b', borderRadius: 3 },
+        { type: 'line', label: 'Puncak', data: hrs.map((h) => hourMap.get(h)?.max_count ?? null), borderColor: '#c23a22', backgroundColor: '#c23a22', pointRadius: 3, borderWidth: 1.5, tension: 0.2 },
+      ],
+    },
+    options: baseOpts({ scales: { x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { beginAtZero: true, title: { display: true, text: 'Jumlah' } } } }),
+  });
+}
+
+async function loadCameras() {
+  const m = await getJSON('/api/meta');
+  $('c-camera').innerHTML = '<option value="">Semua</option>' + m.cameras.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+}
+
+for (const id of ['c-camera', 'c-range', 'c-bucket']) $(id).addEventListener('change', load);
+document.addEventListener('data-updated', load);
+loadCameras().then(load);
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

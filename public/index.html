@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data CCTV</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top" id="top"></header>
+
+<main>
+  <form class="filters" id="filters" aria-label="Filter data" autocomplete="off">
+    <label class="field">Kamera
+      <select id="f-camera"><option value="">Semua</option></select>
+    </label>
+    <label class="field">Level
+      <select id="f-level"><option value="">Semua</option></select>
+    </label>
+    <label class="field">Keputusan
+      <select id="f-decision"><option value="">Semua</option></select>
+    </label>
+    <label class="field">Dari
+      <input type="datetime-local" id="f-from">
+    </label>
+    <label class="field">Sampai
+      <input type="datetime-local" id="f-to">
+    </label>
+    <label class="field">Jumlah minimal
+      <input type="number" id="f-min" min="0" inputmode="numeric">
+    </label>
+    <label class="field">Jumlah maksimal
+      <input type="number" id="f-max" min="0" inputmode="numeric">
+    </label>
+    <label class="field wide">Cari nama file
+      <input type="search" id="f-q" placeholder="mis. cctv-1_20261010">
+    </label>
+    <div class="actions">
+      <button class="btn" type="button" id="f-reset">Hapus filter</button>
+      <a class="btn" id="f-csv" href="/api/readings.csv" style="text-decoration:none">Unduh CSV</a>
+    </div>
+  </form>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr id="thead"></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden></div>
+  </div>
+
+  <div class="pager">
+    <div id="summary" aria-live="polite"></div>
+    <div class="size">
+      <label for="f-size">Baris per halaman</label>
+      <select id="f-size">
+        <option>10</option><option selected>25</option><option>50</option><option>100</option>
+      </select>
+    </div>
+    <nav class="pages" id="pages" aria-label="Halaman data"></nav>
+  </div>
+</main>
+
+<dialog id="detail" aria-labelledby="dlg-title">
+  <div class="dlg-head">
+    <h2 id="dlg-title">Detail pembacaan</h2>
+    <button class="btn" type="button" id="dlg-close">Tutup</button>
+  </div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script src="/common.js"></script>
+<script>
+renderTop('data');
+
+const COLUMNS = [
+  { key: 'polled_at', label: 'Waktu ambil' },
+  { key: 'checked_at', label: 'Waktu cek kamera' },
+  { key: 'camera_id', label: 'Kamera' },
+  { key: 'obj_count', label: 'Jumlah', num: true },
+  { key: 'decision', label: 'Keputusan' },
+  { key: 'level', label: 'Level' },
+  { key: 'inner_pct', label: 'Inner', num: true },
+  { key: 'outer_pct', label: 'Outer', num: true },
+  { key: null, label: 'Gambar' },
+];
+
+const state = { page: 1, pageSize: 25, sort: 'polled_at', dir: 'desc' };
+const $ = (id) => document.getElementById(id);
+
+/* ---------- filter ---------- */
+const toISO = (v) => (v ? new Date(v).toISOString() : '');
+function filterParams() {
+  return {
+    camera: $('f-camera').value,
+    level: $('f-level').value,
+    decision: $('f-decision').value,
+    from: toISO($('f-from').value),
+    to: toISO($('f-to').value),
+    min_count: $('f-min').value,
+    max_count: $('f-max').value,
+    q: $('f-q').value.trim(),
+  };
+}
+
+async function loadMeta() {
+  const m = await getJSON('/api/meta');
+  const fill = (id, values, fmt = (v) => v) => {
+    const sel = $(id);
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">Semua</option>' + values.map((v) => `<option value="${esc(v)}">${esc(fmt(v))}</option>`).join('');
+    sel.value = cur;
+  };
+  fill('f-camera', m.cameras);
+  fill('f-level', m.levels, levelLabel);
+  fill('f-decision', m.decisions);
+}
+
+/* ---------- tabel ---------- */
+function renderHead() {
+  $('thead').innerHTML = COLUMNS.map((c) => {
+    if (!c.key) return `<th scope="col">${c.label}</th>`;
+    const active = state.sort === c.key;
+    const arrow = active ? (state.dir === 'asc' ? '▲' : '▼') : '';
+    const aria = active ? ` aria-sort="${state.dir === 'asc' ? 'ascending' : 'descending'}"` : '';
+    return `<th scope="col" class="${c.num ? 'num' : ''}"${aria}><button type="button" data-sort="${c.key}">${c.label}<span class="arrow">${arrow}</span></button></th>`;
+  }).join('');
+}
+
+function renderRows(rows) {
+  $('tbody').innerHTML = rows.map((r) => `
+    <tr class="lv-${levelTone(r.level)}">
+      <td><button class="open" type="button" data-id="${r.id}">${esc(fmtDT(r.polled_at))}</button></td>
+      <td class="muted">${esc((r.checked_at || '–').replace('T', ' '))}</td>
+      <td>${esc(r.camera_id)}</td>
+      <td class="num">${fmtNum(r.obj_count)}</td>
+      <td>${esc(r.decision || '–')}</td>
+      <td>${levelChip(r.level)}</td>
+      <td class="num">${fmtPct(r.inner_pct)}</td>
+      <td class="num">${fmtPct(r.outer_pct)}</td>
+      <td>${r.image_file
+        ? `<img class="thumb" loading="lazy" src="/images/${encodeURIComponent(r.image_file)}" alt="Gambar ${esc(r.camera_id)} pukul ${esc(fmtShort(r.polled_at))}" data-id="${r.id}">`
+        : '<span class="muted">Tidak ada</span>'}</td>
+    </tr>`).join('');
+}
+
+function pageList(page, pages) {
+  const set = new Set([1, pages, page - 2, page - 1, page, page + 1, page + 2]);
+  const list = [...set].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
+  const out = [];
+  list.forEach((n, i) => { if (i && n - list[i - 1] > 1) out.push('…'); out.push(n); });
+  return out;
+}
+
+function renderPager(res) {
+  const { page, pages, total, pageSize } = res;
+  const from = total ? (page - 1) * pageSize + 1 : 0;
+  const to = Math.min(total, page * pageSize);
+  $('summary').textContent = total ? `Menampilkan ${fmtNum(from)}–${fmtNum(to)} dari ${fmtNum(total)} data` : '0 data';
+  const btn = (label, p, opts = {}) =>
+    `<button type="button" data-page="${p}" ${opts.disabled ? 'disabled' : ''} ${opts.current ? 'aria-current="page"' : ''} ${opts.aria ? `aria-label="${opts.aria}"` : ''}>${label}</button>`;
+  $('pages').innerHTML =
+    btn('‹', page - 1, { disabled: page <= 1, aria: 'Halaman sebelumnya' }) +
+    pageList(page, pages).map((n) => (n === '…' ? '<span class="muted" style="padding:6px 4px">…</span>' : btn(n, n, { current: n === page }))).join('') +
+    btn('›', page + 1, { disabled: page >= pages, aria: 'Halaman berikutnya' });
+}
+
+let reqId = 0;
+async function load() {
+  const my = ++reqId;
+  const params = { ...filterParams(), page: state.page, pageSize: state.pageSize, sort: state.sort, dir: state.dir };
+  try {
+    const res = await getJSON('/api/readings', params);
+    if (my !== reqId) return;
+    state.page = res.page;
+    renderHead();
+    renderRows(res.rows);
+    renderPager(res);
+    const empty = $('empty');
+    if (!res.total) {
+      const filtered = Object.values(filterParams()).some(Boolean);
+      empty.hidden = false;
+      empty.innerHTML = filtered
+        ? '<strong>Tidak ada data yang cocok</strong>Ubah atau hapus filter untuk melihat data lain.'
+        : '<strong>Belum ada data</strong>Data pertama akan muncul setelah pengambilan selesai. Klik “Ambil sekarang” untuk mencoba.';
+    } else {
+      empty.hidden = true;
+    }
+    const csv = new URLSearchParams(Object.entries(filterParams()).filter(([, v]) => v));
+    $('f-csv').href = '/api/readings.csv' + (csv.toString() ? `?${csv}` : '');
+  } catch (e) {
+    $('tbody').innerHTML = '';
+    $('empty').hidden = false;
+    $('empty').innerHTML = `<strong>Data tidak bisa dimuat</strong>${esc(e.message)}`;
+  }
+}
+
+/* ---------- event ---------- */
+let timer;
+const reload = () => { state.page = 1; load(); };
+for (const id of ['f-camera', 'f-level', 'f-decision', 'f-from', 'f-to']) $(id).addEventListener('change', reload);
+for (const id of ['f-min', 'f-max', 'f-q']) $(id).addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(reload, 350); });
+$('filters').addEventListener('submit', (e) => e.preventDefault());
+$('f-reset').addEventListener('click', () => { $('filters').reset(); reload(); });
+$('f-size').addEventListener('change', (e) => { state.pageSize = Number(e.target.value); reload(); });
+
+$('thead').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-sort]');
+  if (!b) return;
+  const key = b.dataset.sort;
+  if (state.sort === key) state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+  else { state.sort = key; state.dir = key === 'camera_id' || key === 'decision' || key === 'level' ? 'asc' : 'desc'; }
+  state.page = 1;
+  load();
+});
+$('pages').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-page]');
+  if (!b || b.disabled) return;
+  state.page = Number(b.dataset.page);
+  load();
+  window.scrollTo({ top: 0 });
+});
+$('tbody').addEventListener('click', (e) => {
+  const t = e.target.closest('[data-id]');
+  if (t) openDetail(t.dataset.id);
+});
+document.addEventListener('data-updated', () => { loadMeta(); load(); });
+
+/* ---------- detail ---------- */
+const dlg = $('detail');
+$('dlg-close').addEventListener('click', () => dlg.close());
+dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+
+async function openDetail(id) {
+  try {
+    const r = await getJSON(`/api/readings/${id}`);
+    $('dlg-title').textContent = `${r.camera_id} pada ${fmtDT(r.polled_at)}`;
+    const zones = (r.zones || []).map((z) => `
+      <div class="zone-row">
+        <span>${esc(z.label || z.kind)}</span>
+        <div class="bar"><i class="${levelTone(z.level)}" style="width:${Math.min(100, Math.max(0, z.pct || 0))}%"></i></div>
+        <span style="text-align:right">${fmtPct(z.pct)}</span>
+      </div>`).join('');
+    $('dlg-body').innerHTML = `
+      <div>${r.image_file
+        ? `<a href="/images/${encodeURIComponent(r.image_file)}" target="_blank" rel="noopener"><img src="/images/${encodeURIComponent(r.image_file)}" alt="Gambar ${esc(r.camera_id)}"></a>`
+        : '<div class="no-img">Gambar tidak tersimpan untuk pembacaan ini</div>'}</div>
+      <div>
+        <dl class="kv">
+          <dt>Level</dt><dd>${levelChip(r.level)}</dd>
+          <dt>Keputusan</dt><dd>${esc(r.decision || '–')}</dd>
+          <dt>Jumlah</dt><dd>${fmtNum(r.obj_count)}</dd>
+          <dt>Waktu cek kamera</dt><dd>${esc((r.checked_at || '–').replace('T', ' '))}</dd>
+          <dt>Sumber mask</dt><dd>${esc(r.mask_source || '–')}</dd>
+          <dt>File asli API</dt><dd>${esc(r.source_filename || '–')}</dd>
+          <dt>File tersimpan</dt><dd>${esc(r.image_file || '–')} (${fmtBytes(r.image_bytes)})</dd>
+          <dt>Stream</dt><dd>${r.stream_connected == null ? '–' : r.stream_connected ? 'Terhubung' : 'Terputus'}${r.stream_error ? `, ${esc(r.stream_error)}` : ''}</dd>
+          <dt>Monitoring</dt><dd>${esc(r.monitoring || '–')}</dd>
+        </dl>
+        <h3>Tingkat keterisian zona</h3>
+        ${zones || '<span class="muted">Tidak ada data zona</span>'}
+      </div>
+      <details class="raw"><summary>Data mentah dari API</summary><pre>${esc(JSON.stringify(JSON.parse(r.raw_json || '{}'), null, 2))}</pre></details>`;
+    dlg.showModal();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+loadMeta().then(load);
+</script>
+</body>
+</html>
